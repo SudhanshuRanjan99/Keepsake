@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from "crypto";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import { db } from "@/db";
-import { getPublicAppUrl } from "@/lib/public-url";
 import {
   memories,
   profiles,
@@ -9,15 +8,18 @@ import {
   telegramOnboardingTokens,
   telegramProcessedUpdates,
 } from "@/db/schema";
+import { getPublicAppUrl } from "@/lib/public-url";
 import { uploadPrivateObject } from "@/lib/r2";
 import { hasActiveAiPlan } from "@/lib/subscription";
-import { enqueueVoiceTranscriptionForPaidUser } from "@/lib/voice-transcription";
 import {
   downloadTelegramFile,
   getTelegramWebhookSecret,
+  sendTelegramAppMenu,
   sendTelegramMessage,
+  sendTelegramSingleAppButton,
   sendTelegramWebAppButtonMessage,
 } from "@/lib/telegram";
+import { enqueueVoiceTranscriptionForPaidUser } from "@/lib/voice-transcription";
 
 export const runtime = "nodejs";
 
@@ -61,6 +63,29 @@ type TelegramUpdate = {
   };
 };
 
+type CommandResult =
+  | {
+      type: "reply";
+      text: string;
+    }
+  | {
+      type: "signup";
+      text: string;
+      buttonText: string;
+      url: string;
+    }
+  | {
+      type: "menu";
+      text: string;
+    }
+  | {
+      type: "button";
+      text: string;
+      buttonText: string;
+      url: string;
+    }
+  | null;
+
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -74,9 +99,73 @@ function getDateInTimezone(timezone: string, telegramTimestamp: number) {
   }).format(new Date(telegramTimestamp * 1000));
 }
 
+function parseCommand(messageText: string) {
+  const match = messageText.match(
+    /^\/([a-zA-Z]+)(?:@\w+)?(?:\s+(.+))?$/,
+  );
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    command: match[1].toLowerCase(),
+    argument: match[2]?.trim() ?? null,
+  };
+}
+
 async function replySafely(chatId: string, text: string) {
   await sendTelegramMessage(chatId, text).catch((error) => {
     console.error("Telegram reply failed:", error);
+  });
+}
+
+async function sendCommandResult(
+  chatId: string,
+  result: CommandResult,
+  appUrl: string,
+) {
+  if (!result) {
+    return;
+  }
+
+  if (result.type === "reply") {
+    await replySafely(chatId, result.text);
+    return;
+  }
+
+  if (result.type === "signup") {
+    await sendTelegramWebAppButtonMessage({
+      chatId,
+      text: result.text,
+      buttonText: result.buttonText,
+      webAppUrl: result.url,
+    }).catch((error) => {
+      console.error("Telegram signup button failed:", error);
+    });
+
+    return;
+  }
+
+  if (result.type === "menu") {
+    await sendTelegramAppMenu({
+      chatId,
+      text: result.text,
+      appUrl,
+    }).catch((error) => {
+      console.error("Telegram menu failed:", error);
+    });
+
+    return;
+  }
+
+  await sendTelegramSingleAppButton({
+    chatId,
+    text: result.text,
+    buttonText: result.buttonText,
+    url: result.url,
+  }).catch((error) => {
+    console.error("Telegram navigation button failed:", error);
   });
 }
 
@@ -103,16 +192,18 @@ export async function POST(request: Request) {
   }
 
   const chatId = String(message.chat.id);
-  const messageText = message.text?.trim();
+  const messageText = message.text?.trim() ?? "";
   const caption = message.caption?.trim().slice(0, 1000) || null;
+  const appUrl = getPublicAppUrl();
 
   try {
     /*
-      Commands and connection links are processed transactionally.
-      This protects one-time connection links and avoids repeated command work.
+      Commands are handled before ordinary messages so commands never become
+      memory entries. The processed-update record also prevents duplicate
+      Telegram deliveries from repeating command work.
     */
-    if (messageText?.startsWith("/")) {
-      const commandResult = await db.transaction(async (tx) => {
+    if (messageText.startsWith("/")) {
+      const commandResult: CommandResult = await db.transaction(async (tx) => {
         const insertedUpdates = await tx
           .insert(telegramProcessedUpdates)
           .values({
@@ -129,12 +220,31 @@ export async function POST(request: Request) {
           return null;
         }
 
-        const startMatch = messageText.match(
-          /^\/start(?:@\w+)?\s+([A-Za-z0-9_-]{20,64})$/,
-        );
+        const parsedCommand = parseCommand(messageText);
 
-        if (startMatch) {
-          const tokenHash = hashToken(startMatch[1]);
+        if (!parsedCommand) {
+          return {
+            type: "reply",
+            text: "Unknown command. Send /help to see available commands.",
+          };
+        }
+
+        const { command, argument } = parsedCommand;
+
+        /*
+          Existing website-to-Telegram linking flow:
+          /start <one-time-link-token>
+        */
+        if (command === "start" && argument) {
+          if (!/^[A-Za-z0-9_-]{20,64}$/.test(argument)) {
+            return {
+              type: "reply",
+              text:
+                "This connection link is invalid or expired. Return to Keepsake and create a new Telegram connection link.",
+            };
+          }
+
+          const tokenHash = hashToken(argument);
 
           const matchingTokens = await tx
             .select()
@@ -152,7 +262,8 @@ export async function POST(request: Request) {
 
           if (!linkToken) {
             return {
-              reply:
+              type: "reply",
+              text:
                 "This connection link is invalid or expired. Return to Keepsake and create a new Telegram connection link.",
             };
           }
@@ -172,7 +283,8 @@ export async function POST(request: Request) {
             existingConnection.id !== linkToken.userId
           ) {
             return {
-              reply:
+              type: "reply",
+              text:
                 "This Telegram account is already connected to another Keepsake account.",
             };
           }
@@ -197,62 +309,150 @@ export async function POST(request: Request) {
             .where(eq(telegramLinkTokens.id, linkToken.id));
 
           return {
-            reply:
+            type: "reply",
+            text:
               "Telegram is connected to your Keepsake account. Send a message, photograph, or voice note and it will be saved privately.",
           };
         }
 
-        if (messageText === "/help") {
+        const connectedProfiles = await tx
+          .select({
+            id: profiles.id,
+            fullName: profiles.fullName,
+          })
+          .from(profiles)
+          .where(eq(profiles.telegramChatId, chatId))
+          .limit(1);
+
+        const connectedProfile = connectedProfiles[0];
+
+        /*
+          Telegram-first signup for users who do not yet have an account.
+          Linked users receive their menu instead of another signup link.
+        */
+        if (command === "start") {
+          if (connectedProfile) {
+            return {
+              type: "menu",
+              text: `Welcome back, ${connectedProfile.fullName}. What would you like to open?`,
+            };
+          }
+
+          const onboardingToken = randomBytes(24).toString("base64url");
+          const tokenHash = hashToken(onboardingToken);
+
+          await tx
+            .delete(telegramOnboardingTokens)
+            .where(eq(telegramOnboardingTokens.chatId, chatId));
+
+          await tx.insert(telegramOnboardingTokens).values({
+            chatId,
+            telegramUsername:
+              message.from?.username ?? message.chat.username ?? null,
+            tokenHash,
+            expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+          });
+
           return {
-            reply:
-              "Send a text message, photograph, or voice note and Keepsake will save it privately in your timeline.",
+            type: "signup",
+            text:
+              "Welcome to Keepsake. Create your private account securely, then send thoughts, photographs and voice notes here as life happens.",
+            buttonText: "Create my Keepsake account",
+            url: `${appUrl}/telegram/signup?token=${onboardingToken}`,
           };
         }
 
-        if (messageText === "/start") {
-  const onboardingToken = randomBytes(24).toString("base64url");
-  const tokenHash = hashToken(onboardingToken);
+        if (command === "help") {
+          return {
+            type: "reply",
+            text: [
+              "Keepsake saves private fragments of your life.",
+              "",
+              "Send a message to save a thought.",
+              "Send a photograph to save a moment.",
+              "Send a voice note to save your words.",
+              "",
+              "Commands:",
+              "/menu — open your private Keepsake pages",
+              "/timeline — open your memories",
+              "/journal — open your journals",
+              "/billing — open plan and payments",
+              "/settings — open your settings",
+            ].join("\n"),
+          };
+        }
 
-  await tx
-    .delete(telegramOnboardingTokens)
-    .where(eq(telegramOnboardingTokens.chatId, chatId));
+        if (command === "menu") {
+          if (!connectedProfile) {
+            return {
+              type: "reply",
+              text:
+                "Your Telegram account is not connected yet. Send /start to create your private Keepsake account.",
+            };
+          }
 
-  await tx.insert(telegramOnboardingTokens).values({
-    chatId,
-    telegramUsername:
-      message.from?.username ?? message.chat.username ?? null,
-    tokenHash,
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
-  });
+          return {
+            type: "menu",
+            text: "Open your private Keepsake space:",
+          };
+        }
 
-  return {
-    reply: null,
-    webApp: {
-      text:
-        "Welcome to Keepsake. Create your private account securely, then send thoughts, photographs and voice notes here as life happens.",
-      buttonText: "Create my Keepsake account",
-      url: `${getPublicAppUrl()}/telegram/signup?token=${onboardingToken}`,
-    },
-  };
-}
+        const destinations: Record<
+          string,
+          {
+            text: string;
+            buttonText: string;
+            path: string;
+          }
+        > = {
+          timeline: {
+            text: "Your private memory timeline:",
+            buttonText: "Open timeline",
+            path: "/dashboard/memories",
+          },
+          journal: {
+            text: "Your private journals:",
+            buttonText: "Open journals",
+            path: "/dashboard/journals",
+          },
+          billing: {
+            text: "Your plan and payment page:",
+            buttonText: "Open billing",
+            path: "/dashboard/billing",
+          },
+          settings: {
+            text: "Your private settings:",
+            buttonText: "Open settings",
+            path: "/dashboard/settings",
+          },
+        };
+
+        const destination = destinations[command];
+
+        if (destination) {
+          if (!connectedProfile) {
+            return {
+              type: "reply",
+              text:
+                "Your Telegram account is not connected yet. Send /start to begin.",
+            };
+          }
+
+          return {
+            type: "button",
+            text: destination.text,
+            buttonText: destination.buttonText,
+            url: `${appUrl}${destination.path}`,
+          };
+        }
 
         return {
-          reply: "Unknown command.",
+          type: "reply",
+          text: "Unknown command. Send /help to see available commands.",
         };
       });
 
-      if (commandResult?.webApp) {
-  await sendTelegramWebAppButtonMessage({
-    chatId,
-    text: commandResult.webApp.text,
-    buttonText: commandResult.webApp.buttonText,
-    webAppUrl: commandResult.webApp.url,
-  }).catch((error) => {
-    console.error("Telegram onboarding button failed:", error);
-  });
-} else if (commandResult?.reply) {
-  await replySafely(chatId, commandResult.reply);
-}
+      await sendCommandResult(chatId, commandResult, appUrl);
 
       return Response.json({ ok: true });
     }
@@ -268,15 +468,15 @@ export async function POST(request: Request) {
     if (!profile) {
       await replySafely(
         chatId,
-        "This Telegram chat is not connected yet. Open Keepsake on the web and connect Telegram from your dashboard.",
+        "This Telegram chat is not connected yet. Send /start to create your private Keepsake account.",
       );
 
       return Response.json({ ok: true });
     }
 
     /*
-      Text memories are database-only, so the update marker and memory row
-      can be created safely in the same transaction.
+      Text memories are database-only, so the update marker and memory row are
+      created together inside one transaction.
     */
     if (messageText) {
       const wasSaved = await db.transaction(async (tx) => {
@@ -325,8 +525,8 @@ export async function POST(request: Request) {
     }
 
     /*
-      Telegram sends multiple image sizes. The last entry is the largest
-      available photo representation.
+      Telegram provides several photo resolutions. The last one is the
+      largest available version.
     */
     if (message.photo?.length) {
       const largestPhoto = message.photo[message.photo.length - 1];
@@ -335,14 +535,22 @@ export async function POST(request: Request) {
         largestPhoto.file_size &&
         largestPhoto.file_size > maximumTelegramMediaSize
       ) {
-        await replySafely(chatId, "This photo is too large. Maximum size is 10 MB.");
+        await replySafely(
+          chatId,
+          "This photo is too large. Maximum size is 10 MB.",
+        );
+
         return Response.json({ ok: true });
       }
 
       const downloadedPhoto = await downloadTelegramFile(largestPhoto.file_id);
 
       if (downloadedPhoto.fileSize > maximumTelegramMediaSize) {
-        await replySafely(chatId, "This photo is too large. Maximum size is 10 MB.");
+        await replySafely(
+          chatId,
+          "This photo is too large. Maximum size is 10 MB.",
+        );
+
         return Response.json({ ok: true });
       }
 
@@ -429,6 +637,7 @@ export async function POST(request: Request) {
 
       if (!extension) {
         await replySafely(chatId, "This voice-note format is not supported.");
+
         return Response.json({ ok: true });
       }
 
@@ -452,67 +661,70 @@ export async function POST(request: Request) {
       });
 
       const savedMemoryId = await db.transaction(async (tx) => {
-  const insertedUpdates = await tx
-    .insert(telegramProcessedUpdates)
-    .values({
-      updateId: update.update_id,
-    })
-    .onConflictDoNothing({
-      target: telegramProcessedUpdates.updateId,
-    })
-    .returning({
-      updateId: telegramProcessedUpdates.updateId,
-    });
+        const insertedUpdates = await tx
+          .insert(telegramProcessedUpdates)
+          .values({
+            updateId: update.update_id,
+          })
+          .onConflictDoNothing({
+            target: telegramProcessedUpdates.updateId,
+          })
+          .returning({
+            updateId: telegramProcessedUpdates.updateId,
+          });
 
-  if (insertedUpdates.length === 0) {
-    return null;
-  }
+        if (insertedUpdates.length === 0) {
+          return null;
+        }
 
-  const createdMemories = await tx
-    .insert(memories)
-    .values({
-      userId: profile.id,
-      source: "telegram",
-      telegramUpdateId: update.update_id,
-      type: "voice",
-      rawText: caption,
-      mediaKey: objectKey,
-      mediaMimeType: mimeType,
-      mediaSizeBytes: downloadedVoice.fileSize,
-      originalFileName: `telegram-voice-${message.message_id}.${extension}`,
-      memoryDate: getDateInTimezone(profile.timezone, message.date),
-      isPrivate: true,
-    })
-    .returning({
-      id: memories.id,
-    });
+        const createdMemories = await tx
+          .insert(memories)
+          .values({
+            userId: profile.id,
+            source: "telegram",
+            telegramUpdateId: update.update_id,
+            type: "voice",
+            rawText: caption,
+            mediaKey: objectKey,
+            mediaMimeType: mimeType,
+            mediaSizeBytes: downloadedVoice.fileSize,
+            originalFileName: `telegram-voice-${message.message_id}.${extension}`,
+            memoryDate: getDateInTimezone(profile.timezone, message.date),
+            isPrivate: true,
+          })
+          .returning({
+            id: memories.id,
+          });
 
-  await tx
-    .update(profiles)
-    .set({
-      lastActiveAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(eq(profiles.id, profile.id));
+        await tx
+          .update(profiles)
+          .set({
+            lastActiveAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(profiles.id, profile.id));
 
-  return createdMemories[0]?.id ?? null;
-});
+        return createdMemories[0]?.id ?? null;
+      });
 
-if (savedMemoryId) {
-  await enqueueVoiceTranscriptionForPaidUser({
-    memoryId: savedMemoryId,
-    profile,
-  }).catch((error) => {
-    console.error("Automatic Telegram voice transcription queue failed:", error);
-  });
+      if (savedMemoryId) {
+        await enqueueVoiceTranscriptionForPaidUser({
+          memoryId: savedMemoryId,
+          profile,
+        }).catch((error) => {
+          console.error(
+            "Automatic Telegram voice transcription queue failed:",
+            error,
+          );
+        });
 
-  await replySafely(
-    chatId,
-    hasActiveAiPlan(profile)
-      ? "Voice note saved privately. Transcription is being prepared."
-      : "Voice note saved privately.",
-  );
-}
+        await replySafely(
+          chatId,
+          hasActiveAiPlan(profile)
+            ? "Voice note saved privately. Transcription is being prepared."
+            : "Voice note saved privately.",
+        );
+      }
 
       return Response.json({ ok: true });
     }

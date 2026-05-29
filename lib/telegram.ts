@@ -113,6 +113,119 @@ export async function sendTelegramWebAppButtonMessage({
   }
 }
 
+export async function sendTelegramAppMenu({
+  chatId,
+  text,
+  appUrl,
+}: {
+  chatId: string;
+  text: string;
+  appUrl: string;
+}) {
+  const botToken = getTelegramBotToken();
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${botToken}/sendMessage`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "Timeline",
+                web_app: {
+                  url: `${appUrl}/dashboard/memories`,
+                },
+              },
+              {
+                text: "Journals",
+                web_app: {
+                  url: `${appUrl}/dashboard/journals`,
+                },
+              },
+            ],
+            [
+              {
+                text: "Billing",
+                web_app: {
+                  url: `${appUrl}/dashboard/billing`,
+                },
+              },
+              {
+                text: "Settings",
+                web_app: {
+                  url: `${appUrl}/dashboard/settings`,
+                },
+              },
+            ],
+          ],
+        },
+      }),
+      cache: "no-store",
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    throw new Error(`Telegram app menu failed: ${errorText}`);
+  }
+}
+
+export async function sendTelegramSingleAppButton({
+  chatId,
+  text,
+  buttonText,
+  url,
+}: {
+  chatId: string;
+  text: string;
+  buttonText: string;
+  url: string;
+}) {
+  const botToken = getTelegramBotToken();
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${botToken}/sendMessage`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: buttonText,
+                web_app: {
+                  url,
+                },
+              },
+            ],
+          ],
+        },
+      }),
+      cache: "no-store",
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    throw new Error(`Telegram app button failed: ${errorText}`);
+  }
+}
+
+
 export async function downloadTelegramFile(fileId: string) {
   const botToken = getTelegramBotToken();
 
