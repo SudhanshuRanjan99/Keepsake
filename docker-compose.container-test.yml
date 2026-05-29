@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: keepsake_postgres_container_test
+    restart: unless-stopped
+    env_file:
+      - .env.container-test
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - keepsake_postgres_container_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: infrastructure/Dockerfile.app
+    container_name: keepsake_app_container_test
+    restart: unless-stopped
+    env_file:
+      - .env.container-test
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3001:3000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/Dockerfile.worker
+    container_name: keepsake_worker_container_test
+    restart: unless-stopped
+    env_file:
+      - .env.container-test
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  keepsake_postgres_container_test_data:

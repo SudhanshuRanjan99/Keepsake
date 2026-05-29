@@ -1,0 +1,69 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1779883105594,
+      "tag": "0000_free_imperial_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1779900256974,
+      "tag": "0001_demonic_molly_hayes",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779903545302,
+      "tag": "0002_cold_mad_thinker",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1779950474260,
+      "tag": "0003_huge_butterfly",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1779952772073,
+      "tag": "0004_wonderful_madripoor",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1779953284223,
+      "tag": "0005_big_carlie_cooper",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1779955801906,
+      "tag": "0006_old_jamie_braddock",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1779957704236,
+      "tag": "0007_majestic_colonel_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1780073472572,
+      "tag": "0008_luxuriant_gauntlet",
+      "breakpoints": true
+    }
+  ]
+}

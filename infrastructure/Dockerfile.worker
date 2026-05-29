@@ -1,0 +1,17 @@
+FROM node:24-bookworm-slim
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+
+RUN npm ci --omit=dev \
+  && npm cache clean --force
+
+COPY tsconfig.json ./
+COPY db ./db
+COPY lib ./lib
+COPY worker ./worker
+
+CMD ["./node_modules/.bin/tsx", "worker/index.ts"]
