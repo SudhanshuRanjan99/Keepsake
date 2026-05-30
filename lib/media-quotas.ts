@@ -1,4 +1,4 @@
-import { and, eq, gte, lt } from "drizzle-orm";
+import { and, eq, gte, lt, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { memories, profiles } from "@/db/schema";
 import { hasActiveAiPlan } from "@/lib/subscription";
@@ -20,7 +20,11 @@ type BlockedQuotaResult = {
   plan: EffectivePlan;
   limit: number;
   used: number;
-  code: "paid-plan-required" | "monthly-photo-limit" | "monthly-voice-limit";
+  code:
+    | "paid-plan-required"
+    | "monthly-photo-limit"
+    | "monthly-voice-limit"
+    | "monthly-transcription-minutes-limit";
   message: string;
 };
 
@@ -53,7 +57,7 @@ function getEffectivePlan(profile: Profile): EffectivePlan {
   return "free";
 }
 
-function getMonthlyLimit(plan: EffectivePlan, mediaType: MediaType) {
+function getMonthlyMediaCountLimit(plan: EffectivePlan, mediaType: MediaType) {
   if (plan === "free") {
     return 0;
   }
@@ -71,6 +75,18 @@ function getMonthlyLimit(plan: EffectivePlan, mediaType: MediaType) {
   }
 
   return readPositiveInteger("PRO_VOICE_LIMIT_MONTHLY", 300);
+}
+
+function getMonthlyTranscriptionSecondsLimit(plan: EffectivePlan) {
+  if (plan === "free") {
+    return 0;
+  }
+
+  if (plan === "plus") {
+    return readPositiveInteger("PLUS_TRANSCRIPTION_MINUTES_MONTHLY", 120) * 60;
+  }
+
+  return readPositiveInteger("PRO_TRANSCRIPTION_MINUTES_MONTHLY", 600) * 60;
 }
 
 function getCurrentLocalMonthRange(timezone: string) {
@@ -111,7 +127,7 @@ export async function checkMediaUploadQuota({
   mediaType: MediaType;
 }): Promise<MediaQuotaResult> {
   const plan = getEffectivePlan(profile);
-  const limit = getMonthlyLimit(plan, mediaType);
+  const limit = getMonthlyMediaCountLimit(plan, mediaType);
 
   if (plan === "free") {
     return {
@@ -164,5 +180,73 @@ export async function checkMediaUploadQuota({
     limit,
     used,
     remainingAfterUpload: limit - used - 1,
+  };
+}
+
+export async function checkTranscriptionDurationQuota({
+  profile,
+  durationSeconds,
+}: {
+  profile: Profile;
+  durationSeconds: number;
+}): Promise<MediaQuotaResult> {
+  const plan = getEffectivePlan(profile);
+  const limit = getMonthlyTranscriptionSecondsLimit(plan);
+
+  if (plan === "free") {
+    return {
+      allowed: false,
+      plan,
+      limit: 0,
+      used: 0,
+      code: "paid-plan-required",
+      message: "Voice transcription requires an active Plus or Pro plan.",
+    };
+  }
+
+  const safeDurationSeconds = Math.max(0, Math.ceil(durationSeconds));
+
+  const { monthStart, nextMonthStart } = getCurrentLocalMonthRange(
+    profile.timezone,
+  );
+
+  const rows = await db
+    .select({
+      used: sql<number>`coalesce(sum(${memories.transcribedDurationSeconds}), 0)`,
+    })
+    .from(memories)
+    .where(
+      and(
+        eq(memories.userId, profile.id),
+        eq(memories.type, "voice"),
+        gte(memories.memoryDate, monthStart),
+        lt(memories.memoryDate, nextMonthStart),
+      ),
+    );
+
+  const used = Number(rows[0]?.used ?? 0);
+
+  if (used + safeDurationSeconds > limit) {
+    return {
+      allowed: false,
+      plan,
+      limit,
+      used,
+      code: "monthly-transcription-minutes-limit",
+      message: `This voice note would exceed your monthly transcription limit of ${Math.floor(
+        limit / 60,
+      )} minutes. You have ${Math.max(
+        0,
+        Math.floor((limit - used) / 60),
+      )} minutes remaining.`,
+    };
+  }
+
+  return {
+    allowed: true,
+    plan,
+    limit,
+    used,
+    remainingAfterUpload: limit - used - safeDurationSeconds,
   };
 }

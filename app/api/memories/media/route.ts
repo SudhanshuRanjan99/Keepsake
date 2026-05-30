@@ -3,9 +3,14 @@ import { redirect } from "next/navigation";
 import { db } from "@/db";
 import { memories, profiles } from "@/db/schema";
 import { getRequiredProfile } from "@/lib/current-profile";
-import { enqueueVoiceTranscriptionForPaidUser } from "@/lib/voice-transcription";
+import { getAudioDurationSeconds } from "@/lib/audio-duration";
+import {
+  checkMediaUploadQuota,
+  checkTranscriptionDurationQuota,
+} from "@/lib/media-quotas";
 import { deletePrivateObject, uploadPrivateObject } from "@/lib/r2";
 import { eq } from "drizzle-orm";
+import { queueVoiceTranscription } from "@/lib/jobs";
 
 export const runtime = "nodejs";
 
@@ -86,15 +91,46 @@ export async function POST(request: Request) {
     );
   }
 
-  const caption =
+    const caption =
     typeof captionValue === "string"
       ? captionValue.trim().slice(0, 1000)
       : "";
 
+  const mediaQuota = await checkMediaUploadQuota({
+    profile,
+    mediaType: fileDefinition.memoryType,
+  });
+
+  if (!mediaQuota.allowed) {
+    return new Response(mediaQuota.message, {
+      status: 403,
+    });
+  }
+
   const objectKey = `users/${profile.id}/${fileDefinition.memoryType}/${randomUUID()}.${fileDefinition.extension}`;
 
-  try {
+    try {
     const body = Buffer.from(await uploadedFile.arrayBuffer());
+
+    let voiceDurationSeconds: number | null = null;
+
+    if (fileDefinition.memoryType === "voice") {
+      voiceDurationSeconds = await getAudioDurationSeconds({
+        buffer: body,
+        extension: fileDefinition.extension,
+      });
+
+      const transcriptionQuota = await checkTranscriptionDurationQuota({
+        profile,
+        durationSeconds: voiceDurationSeconds,
+      });
+
+      if (!transcriptionQuota.allowed) {
+        return new Response(transcriptionQuota.message, {
+          status: 403,
+        });
+      }
+    }
 
     await uploadPrivateObject({
       key: objectKey,
@@ -103,41 +139,46 @@ export async function POST(request: Request) {
     });
 
     const createdMemories = await db
-  .insert(memories)
-  .values({
-    userId: profile.id,
-    source: "web",
-    type: fileDefinition.memoryType,
-    rawText: caption || null,
-    mediaKey: objectKey,
-    mediaMimeType: uploadedFile.type,
-    mediaSizeBytes: uploadedFile.size,
-    originalFileName: uploadedFile.name.slice(0, 255),
-    memoryDate: getDateInTimezone(profile.timezone),
-    isPrivate: true,
-  })
-  .returning({
-    id: memories.id,
-  });
+      .insert(memories)
+      .values({
+        userId: profile.id,
+        source: "web",
+        type: fileDefinition.memoryType,
+        rawText: caption || null,
+        mediaKey: objectKey,
+        mediaMimeType: uploadedFile.type,
+        mediaSizeBytes: uploadedFile.size,
+        voiceDurationSeconds,
+        transcribedDurationSeconds:
+          fileDefinition.memoryType === "voice" ? voiceDurationSeconds : null,
+        transcriptionStatus:
+          fileDefinition.memoryType === "voice" ? "queued" : "not_requested",
+        originalFileName: uploadedFile.name.slice(0, 255),
+        memoryDate: getDateInTimezone(profile.timezone),
+        isPrivate: true,
+      })
+      .returning({
+        id: memories.id,
+      });
 
-const createdMemory = createdMemories[0];
+    const createdMemory = createdMemories[0];
 
-await db
-  .update(profiles)
-  .set({
-    lastActiveAt: new Date(),
-    updatedAt: new Date(),
-  })
-  .where(eq(profiles.id, profile.id));
+    await db
+      .update(profiles)
+      .set({
+        lastActiveAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(profiles.id, profile.id));
 
-if (createdMemory && fileDefinition.memoryType === "voice") {
-  await enqueueVoiceTranscriptionForPaidUser({
-    memoryId: createdMemory.id,
-    profile,
-  }).catch((error) => {
-    console.error("Automatic website voice transcription queue failed:", error);
-  });
-}
+    if (createdMemory && fileDefinition.memoryType === "voice") {
+      await queueVoiceTranscription(createdMemory.id).catch((error) => {
+        console.error(
+          "Automatic website voice transcription queue failed:",
+          error,
+        );
+      });
+    }
   } catch (error) {
     await deletePrivateObject(objectKey).catch(() => undefined);
 

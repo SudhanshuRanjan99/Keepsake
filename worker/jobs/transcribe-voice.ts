@@ -127,9 +127,9 @@ export async function transcribeVoiceMemory(memoryId: string) {
 
     const openai = getOpenAiClient();
 
-    const transcription = await openai.audio.transcriptions.create({
+        const transcription = await openai.audio.transcriptions.create({
       file: createReadStream(audioPath),
-      model: "gpt-4o-mini-transcribe",
+      model: process.env.TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe",
       response_format: "json",
     });
 

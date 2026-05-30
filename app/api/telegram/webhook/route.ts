@@ -10,8 +10,13 @@ import {
 } from "@/db/schema";
 import { getPublicAppUrl } from "@/lib/public-url";
 import { uploadPrivateObject } from "@/lib/r2";
-import { checkMediaUploadQuota } from "@/lib/media-quotas";
+import {
+  checkMediaUploadQuota,
+  checkTranscriptionDurationQuota,
+} from "@/lib/media-quotas";
+import { queueVoiceTranscription } from "@/lib/jobs";
 import { hasActiveAiPlan } from "@/lib/subscription";
+
 import {
   downloadTelegramFile,
   getTelegramWebhookSecret,
@@ -634,6 +639,26 @@ export async function POST(request: Request) {
 
         return Response.json({ ok: true });
       }
+
+      const voiceDurationSeconds = Math.ceil(message.voice.duration || 0);
+
+      if (voiceDurationSeconds <= 0) {
+        await replySafely(chatId, "Could not detect this voice note duration.");
+
+        return Response.json({ ok: true });
+      }
+
+      const transcriptionQuota = await checkTranscriptionDurationQuota({
+        profile,
+        durationSeconds: voiceDurationSeconds,
+      });
+
+      if (!transcriptionQuota.allowed) {
+        await replySafely(chatId, transcriptionQuota.message);
+
+        return Response.json({ ok: true });
+      }
+
       if (
         message.voice.file_size &&
         message.voice.file_size > maximumTelegramMediaSize
@@ -708,8 +733,11 @@ export async function POST(request: Request) {
             type: "voice",
             rawText: caption,
             mediaKey: objectKey,
-            mediaMimeType: mimeType,
+                        mediaMimeType: mimeType,
             mediaSizeBytes: downloadedVoice.fileSize,
+            voiceDurationSeconds,
+            transcribedDurationSeconds: voiceDurationSeconds,
+            transcriptionStatus: "queued",
             originalFileName: `telegram-voice-${message.message_id}.${extension}`,
             memoryDate: getDateInTimezone(profile.timezone, message.date),
             isPrivate: true,
@@ -730,21 +758,16 @@ export async function POST(request: Request) {
       });
 
       if (savedMemoryId) {
-        await enqueueVoiceTranscriptionForPaidUser({
-          memoryId: savedMemoryId,
-          profile,
-        }).catch((error) => {
+                await queueVoiceTranscription(savedMemoryId).catch((error) => {
           console.error(
             "Automatic Telegram voice transcription queue failed:",
             error,
           );
         });
 
-        await replySafely(
+                await replySafely(
           chatId,
-          hasActiveAiPlan(profile)
-            ? "Voice note saved privately. Transcription is being prepared."
-            : "Voice note saved privately.",
+          "Voice note saved privately. Transcription is being prepared.",
         );
       }
 

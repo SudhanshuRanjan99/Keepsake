@@ -200,7 +200,11 @@ transcribedAt: timestamp("transcribed_at", {
 
   mediaMimeType: varchar("media_mime_type", { length: 120 }),
 
-  mediaSizeBytes: integer("media_size_bytes"),
+    mediaSizeBytes: integer("media_size_bytes"),
+
+  voiceDurationSeconds: integer("voice_duration_seconds"),
+
+  transcribedDurationSeconds: integer("transcribed_duration_seconds"),
 
   originalFileName: varchar("original_file_name", { length: 255 }),
 

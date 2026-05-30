@@ -1,6 +1,6 @@
 
 
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { memories } from "@/db/schema";
 import { queueVoiceTranscription } from "@/lib/jobs";
@@ -28,9 +28,12 @@ export async function enqueueVoiceTranscriptionForPaidUser({
 
   const updatedMemories = await db
     .update(memories)
-    .set({
+        .set({
       transcriptionStatus: "queued",
       transcriptionError: null,
+      transcribedDurationSeconds: sql`
+        coalesce(${memories.transcribedDurationSeconds}, ${memories.voiceDurationSeconds})
+      `,
       updatedAt: new Date(),
     })
     .where(

@@ -5,7 +5,11 @@ import { memories, profiles } from "@/db/schema";
 import { getRequiredProfile } from "@/lib/current-profile";
 import { deletePrivateObject } from "@/lib/r2";
 import { and, eq } from "drizzle-orm";
-import { checkMediaUploadQuota } from "@/lib/media-quotas";
+import {
+  checkMediaUploadQuota,
+  checkTranscriptionDurationQuota,
+} from "@/lib/media-quotas";
+
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { enqueueVoiceTranscriptionForPaidUser } from "@/lib/voice-transcription";
@@ -180,6 +184,52 @@ export async function queueVoiceTranscriptionAction(formData: FormData) {
 
   if (typeof memoryId !== "string") {
     throw new Error("Memory ID is missing.");
+  }
+
+  const selectedMemories = await db
+    .select({
+      id: memories.id,
+      voiceDurationSeconds: memories.voiceDurationSeconds,
+      transcribedDurationSeconds: memories.transcribedDurationSeconds,
+      transcriptionStatus: memories.transcriptionStatus,
+    })
+    .from(memories)
+    .where(
+      and(
+        eq(memories.id, memoryId),
+        eq(memories.userId, profile.id),
+        eq(memories.type, "voice"),
+      ),
+    )
+    .limit(1);
+
+  const memory = selectedMemories[0];
+
+  if (!memory) {
+    throw new Error("Voice memory was not found.");
+  }
+
+  const durationSeconds =
+    memory.voiceDurationSeconds ?? memory.transcribedDurationSeconds;
+
+  if (!durationSeconds || durationSeconds <= 0) {
+    throw new Error(
+      "This older voice note has no duration recorded. Re-upload it before transcription.",
+    );
+  }
+
+  if (
+    memory.transcriptionStatus === "not_requested" ||
+    memory.transcriptionStatus === "failed"
+  ) {
+    const transcriptionQuota = await checkTranscriptionDurationQuota({
+      profile,
+      durationSeconds,
+    });
+
+    if (!transcriptionQuota.allowed) {
+      throw new Error(transcriptionQuota.message);
+    }
   }
 
   await enqueueVoiceTranscriptionForPaidUser({
