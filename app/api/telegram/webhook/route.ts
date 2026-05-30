@@ -10,6 +10,7 @@ import {
 } from "@/db/schema";
 import { getPublicAppUrl } from "@/lib/public-url";
 import { uploadPrivateObject } from "@/lib/r2";
+import { checkMediaUploadQuota } from "@/lib/media-quotas";
 import { hasActiveAiPlan } from "@/lib/subscription";
 import {
   downloadTelegramFile,
@@ -531,6 +532,17 @@ export async function POST(request: Request) {
     if (message.photo?.length) {
       const largestPhoto = message.photo[message.photo.length - 1];
 
+            const photoQuota = await checkMediaUploadQuota({
+        profile,
+        mediaType: "photo",
+      });
+
+      if (!photoQuota.allowed) {
+        await replySafely(chatId, photoQuota.message);
+
+        return Response.json({ ok: true });
+      }
+
       if (
         largestPhoto.file_size &&
         largestPhoto.file_size > maximumTelegramMediaSize
@@ -612,6 +624,16 @@ export async function POST(request: Request) {
     }
 
     if (message.voice) {
+            const voiceQuota = await checkMediaUploadQuota({
+        profile,
+        mediaType: "voice",
+      });
+
+      if (!voiceQuota.allowed) {
+        await replySafely(chatId, voiceQuota.message);
+
+        return Response.json({ ok: true });
+      }
       if (
         message.voice.file_size &&
         message.voice.file_size > maximumTelegramMediaSize

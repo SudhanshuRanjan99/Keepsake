@@ -5,6 +5,7 @@ import { memories, profiles } from "@/db/schema";
 import { getRequiredProfile } from "@/lib/current-profile";
 import { deletePrivateObject } from "@/lib/r2";
 import { and, eq } from "drizzle-orm";
+import { checkMediaUploadQuota } from "@/lib/media-quotas";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { enqueueVoiceTranscriptionForPaidUser } from "@/lib/voice-transcription";
